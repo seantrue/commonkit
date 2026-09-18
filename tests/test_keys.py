@@ -13,8 +13,10 @@ D1 = "ab" * 16
 
 
 def audio_scheme(domain="audio"):
+    # ``dtypes`` maps FORM -> required dtype; see test_store for enforcement.
     return KeyScheme(domain=domain, version="v1", forms=("wav16k", "f32chw"),
-                     variants=r"^sr\d+$", dtypes={"wav16k": "int16"})
+                     variants=r"^sr\d+$",
+                     dtypes={"wav16k": "int16", "f32chw": "float32"})
 
 
 def test_a_key_round_trips_through_parse():

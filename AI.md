@@ -43,6 +43,43 @@ inside a non-public application first.
 
 ## Contributions
 
+### 2026-09-18 — CLAUDE.md, clearer dtype tests, sox and ffmpeg end-to-end tests (Claude Opus 5, Claude Code)
+
+**What the maintainer asked for, and the correction that shaped it.** After a
+CLAUDE.md was generated (`/init`, ~95 LOC), the maintainer asked what dtype
+`wav16k` was "vs the form", then pointed at `tests/test_store.py` where
+`wav16k` looked like a dtype, then asked *"where is the mapping for f32chw ->
+fp32?"* There was none. The pre-existing suite, written by an AI during the
+extraction, used `f32chw` -- a name that says float32 -- as its example of an
+*unconstrained* form. That is correct code aimed at a misleading target, and
+the maintainer caught it by reading the tests, not any test run. Asked to "make
+the tests and configuration clear about what they are testing": `f32chw` now
+declares float32, a new `raw` form is the explicitly unconstrained one
+(parametrised over four dtypes), a new test shows each form is held to its own
+entry, and comments state that `dtypes` maps FORM -> dtype and that a form's
+name enforces nothing (~28 LOC changed across `test_store.py`, `test_keys.py`).
+A mutation probe -- the store's dtype lookup forced to `None` -- failed exactly
+the two dtype-policy tests.
+
+**Real media, end to end, at the maintainer's request.** *"Add tests that will
+run if sox is installed, dump sample audio to raw using sox, and then map it
+in"*, then, after asking whether video had an equivalent, *"yes, add the ffmpeg
+tests"*. `tests/test_sox.py` (~116 LOC, 4 tests) and `tests/test_ffmpeg.py`
+(~142 LOC, 5 tests) render from each tool's built-in generator (`synth`,
+`lavfi testsrc`), so no media is checked in and the digest names the source
+while rate and encoding become variants and forms. Each publishes, attaches as
+a read-only `np.memmap`, attaches again from a child process by key alone,
+stores two rates side by side, and refuses a float dump under the integer form.
+The video file also pins that an over-ceiling clip is declined whole. Both skip
+when their tool is off `PATH`, checked by running them with a stripped `PATH`.
+Per-frame chunking was deliberately left out: the key has no frame-index field,
+and where one goes is a design decision, not a test's. README and CLAUDE.md
+gained a short section on these tests (~23 LOC in README).
+
+**Defects in this AI-written change.** One: the sox scheme was first written as
+`dict(...)`, which ruff's C408 flagged; rewritten as a literal. Suite: 60
+passed with both tools installed.
+
 ### 2026-09-18 — Extracted into its own package (Claude Opus 5, Claude Code)
 
 **What moved, and what that means for attribution.** Most of the source is not

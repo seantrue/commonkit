@@ -14,9 +14,12 @@ from commonkit import KeyScheme, SharedArrayStore, register
 D1 = "ab" * 16
 D2 = "cd" * 16
 
+# ``dtypes`` maps FORM -> required dtype. A form's name is only a label; the
+# store enforces a dtype only for forms listed here. ``raw`` is deliberately
+# absent, so it is the form that accepts any dtype.
 WAV = register(KeyScheme(domain="ckaudio", version="v1",
-                         forms=("wav16k", "f32chw"), variants=r"^sr\d+$",
-                         dtypes={"wav16k": "int16"}))
+                         forms=("wav16k", "f32chw", "raw"), variants=r"^sr\d+$",
+                         dtypes={"wav16k": "int16", "f32chw": "float32"}))
 
 
 def key(digest=D1, form="wav16k"):
@@ -75,15 +78,29 @@ def test_an_unregistered_domain_is_a_miss_not_a_crash(store):
 def test_a_form_with_a_declared_dtype_refuses_anything_else(store):
     """The rule that used to be a hardcoded ``form != "pil"`` branch inside the
     store. A bad segment is published once and poisons every later reader."""
-    assert store.publish(key(), np.zeros(200_000, dtype=bool)) is False
+    assert store.publish(key(form="wav16k"), np.zeros(200_000, dtype=bool)) is False
     assert store.drain_stats()["shm_declined_dtype"] == 1
 
 
-def test_a_form_with_no_declared_dtype_is_unconstrained(store):
-    """``f32chw`` holds model tensors; a blanket rule would break it."""
-    a = np.zeros((3, 256, 256), dtype=np.float32)
-    assert store.publish(key(form="f32chw"), a) is True
-    assert store.attach(key(form="f32chw")).dtype == np.float32
+def test_each_form_enforces_its_own_declared_dtype(store):
+    """``wav16k`` -> int16 and ``f32chw`` -> float32: each form is held to its
+    OWN entry, so a dtype legal for one form is refused under the other."""
+    wave = _wave()
+    tensor = np.zeros((3, 256, 256), dtype=np.float32)
+
+    assert store.publish(key(form="wav16k"), wave) is True
+    assert store.publish(key(form="f32chw"), tensor) is True
+    assert store.publish(key(D2, form="wav16k"), tensor[0]) is False
+    assert store.publish(key(D2, form="f32chw"), tensor.astype(np.float64)) is False
+    assert store.drain_stats()["shm_declined_dtype"] == 2
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.uint8, np.int16])
+def test_a_form_with_no_declared_dtype_is_unconstrained(store, dtype):
+    """``raw`` has no ``dtypes`` entry, so the store takes whatever it is given."""
+    a = np.zeros((3, 256, 256), dtype=dtype)
+    assert store.publish(key(form="raw"), a) is True
+    assert store.attach(key(form="raw")).dtype == dtype
 
 
 def test_fortran_order_and_dtype_survive(store):

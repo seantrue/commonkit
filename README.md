@@ -40,6 +40,29 @@ orientation (`o0`, `o1`, `oa`), for audio it would be sample rate (`sr16000`).
 Schemes are registered by domain so `parse()` and `relpath()` can dispatch on a
 key alone, which is what lets one store hold several domains.
 
+## Tests
+
+    uv run --extra dev pytest -q
+
+The suite addresses audio and video rather than images, to show the package is
+not pixel-specific. Two modules run end to end against real media and skip
+themselves when their tool is not on `PATH`:
+
+* `tests/test_sox.py` — `sox` synthesizes a sine wave and dumps it as raw
+  int16 (and float32) samples. The samples are published, attached back as a
+  read-only `np.memmap`, attached again from a separate process, and stored at
+  two sample rates as two variants (`sr16000`, `sr44100`) of one digest.
+* `tests/test_ffmpeg.py` — `ffmpeg` renders its `testsrc` pattern to
+  `rawvideo` frames, stored as one `(T, H, W, C)` array. The same checks, with
+  the frame rate as the variant (`fr10`, `fr25`), plus a clip over
+  `max_array_bytes` being declined whole rather than truncated.
+
+Both use their tool's built-in generators, so no media files are checked in.
+Both also exercise per-form dtypes: `dtypes` maps a *form* to the dtype it
+requires (`{"wav16k": "int16"}`), and a float dump is refused under the
+integer form and accepted under the float one. A form's name is only a label —
+the store enforces a dtype only for forms listed in `dtypes`.
+
 ## Origin
 
 Extracted from the pixel-cache layer of a private image-corpus

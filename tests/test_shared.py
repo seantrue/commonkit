@@ -62,3 +62,8 @@ def test_two_callers_share_one_tree(monkeypatch, tmp_path):
 def test_root_argument_is_for_tests(tmp_path):
     store = shared_store(root=tmp_path, min_array_bytes=1)
     assert store.root == str(tmp_path)
+
+
+def test_attach_is_the_callers_choice(tmp_path):
+    assert shared_store(root=tmp_path).attach_mode == "mmap"
+    assert shared_store(root=tmp_path, attach="read").attach_mode == "read"

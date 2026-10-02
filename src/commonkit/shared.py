@@ -16,9 +16,9 @@ Tree-wide policy -- root, byte budget, TTL, free-space floor, reap interval, lar
 array -- comes ONLY from the environment (``COMMONKIT_STORE_*``) or the defaults here,
 never from a caller, because the reaper applies whatever the reaping process was given to
 every segment in the tree: a caller with a longer TTL or a bigger budget would silently
-override everyone else's. A caller chooses only what concerns its own publishing:
-``mode`` and the smallest array worth storing. Tests may pass a ``root`` to stay out of the
-shared tree.
+override everyone else's. A caller chooses only what concerns itself: ``mode``, how it
+reads (``attach``: ``mmap`` shares one physical copy, ``read`` gives it a private one), and
+the smallest array worth storing. Tests may pass a ``root`` to stay out of the shared tree.
 
 Segments of different domains coexist because forms partition the tree
 (``{form}/{digest[:2]}/...``). Form names are therefore global: pick ones no other
@@ -67,8 +67,8 @@ def setting(name: str):
         return default
 
 
-def shared_store(*, mode: str = "readwrite", min_array_bytes: int = 256 * 1024,
-                 root=None) -> SharedArrayStore:
+def shared_store(*, mode: str = "readwrite", attach: str = "mmap",
+                 min_array_bytes: int = 256 * 1024, root=None) -> SharedArrayStore:
     """The host's shared store, with the tree-wide policy from the environment.
 
     Never raises (the store's own contract): an unusable root comes up disabled.
@@ -76,6 +76,7 @@ def shared_store(*, mode: str = "readwrite", min_array_bytes: int = 256 * 1024,
     return SharedArrayStore(
         root or setting("ROOT"),
         mode=mode,
+        attach=attach,
         max_bytes=int(setting("MAX_GB") * 2**30),
         min_free_bytes=int(setting("MIN_FREE_GB") * 2**30),
         ttl_s=setting("TTL_S"),

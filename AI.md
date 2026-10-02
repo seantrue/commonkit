@@ -43,6 +43,25 @@ inside a non-public application first.
 
 ## Contributions
 
+### 2026-10-02 — `shared_store()`: one store per host, with tree-wide policy from the environment (Claude Opus 5.5, Claude Code)
+
+**What the maintainer asked for.** While adopting commonkit as Virtual Impressionist's checkpoint store, the maintainer pointed out that "all instances of the commonkit cache are supposed to share a common backing store directory with age out" and asked whether separate stores were costing memory. Offered two options, the maintainer chose to define the shared defaults in commonkit rather than reuse alexandria's `PIXEL_SHM_*` settings.
+
+**What the AI did.** The AI added `src/commonkit/shared.py` (~85 LOC), exported `shared_store` from `__init__`, and wrote `tests/test_shared.py` (~64 LOC, 5 tests). It also updated `README.md` and `CLAUDE.md`.
+
+- **Tree-wide policy comes only from the environment.** The root, byte budget, TTL, free-space floor, reap interval and largest array come from `COMMONKIT_STORE_*` variables or `DEFAULTS`, never from a caller. The reason is the existing reaper design: whichever process reaps applies its own values to every segment in the tree, so a per-caller override would silently win over everyone else's.
+- **Callers choose only what concerns their own publishing:** `mode` and `min_array_bytes`. A `root` argument exists for tests.
+- **Defaults are alexandria's measured macOS values:** `~/Library/Caches/commonkit/store`, a 2 GB budget (because Time Machine local snapshots pin reaped segments), 900 s TTL, and an 8 GB free-space floor. On Linux the default root is `/dev/shm/commonkit` with 8 GB.
+- **Bad environment values fall back to the defaults** rather than raising, consistent with the never-raise invariant.
+
+**Answer to the memory question, as measured and read.** RAM is not lost: segments are clean, file-backed, read-only mappings, held once in the unified buffer cache and not charged to `phys_footprint` (alexandria's measurement). Disk was the cost: two trees meant two budgets, and on macOS each tree's turnover pins snapshot space. The consumer's separate 8 GB tree was a mistake by the AI, corrected by this change before anything was written to it.
+
+**Testing.** The full suite passes (65 tests, 5 new). ruff's six findings are all in pre-existing files (`cache.py`, `keys.py`, `read.py`).
+
+**Process slip.** The first commit of this change went out without this entry, because an edit to `AI.md` failed and the commit ran anyway. The AI caught it before merging, and the entry was added as a follow-up commit on the same PR.
+
+**Not done.** alexandria still configures its own tree through `PIXEL_SHM_*`. Moving it to `shared_store()` is a separate change in that repository.
+
 ### 2026-09-18 — CLAUDE.md, clearer dtype tests, sox and ffmpeg end-to-end tests (Claude Opus 5, Claude Code)
 
 **What the maintainer asked for, and the correction that shaped it.** After a

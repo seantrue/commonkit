@@ -63,6 +63,7 @@ the call site; the store catches that and counts `shm_bad_key`.
   mapping*, not a copy. `get_with_source` returns `(arr, "l1"|"shm"|"decode")`
   so callers never infer the tier from counter deltas. The store counts its own
   hits/publishes; the tier must not double-count them (`drain_stats` sums both).
+- `shared.py` — `shared_store()`: the one per-host store all users share. Tree-wide policy (root, `MAX_GB`, `TTL_S`, `MIN_FREE_GB`, `REAP_S`, `MAX_ARRAY_BYTES`) comes only from `COMMONKIT_STORE_*` env vars or `DEFAULTS` (macOS: `~/Library/Caches/commonkit/store`, 2 GB because Time Machine local snapshots pin reaped segments; Linux: `/dev/shm/commonkit`, 8 GB). Callers pick only `mode` and `min_array_bytes`; a `root` argument exists for tests. Form names are global across domains in the shared tree.
 - `read.py` — `note()` (the single writer of `{prefix}{source}` counters,
   raises on an unknown source) and a never-raising `attach()` helper. Not
   re-exported from `__init__`.

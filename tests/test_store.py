@@ -5,6 +5,7 @@ is never an error, only a slower path**. Absent root, full filesystem, reaped
 segment, torn file, malformed key -- all return None or False.
 """
 import os
+import time
 
 import numpy as np
 import pytest
@@ -226,3 +227,126 @@ def test_reaper_leaves_fresh_segments_alone(store):
     store.publish(key(), _wave())
     assert store.reap(budget_s=5)["reaped"] == 0
     assert store.attach(key()) is not None
+
+
+# ------------------------------------------------------------ LRU eviction
+# (2026-10-16: none of this was tested, and a store sat full for 5.7 days with
+# 1,104 expired segments because nothing ever reaped it again.)
+
+def _keys_n(n):
+    return [WAV.key(f"{i:032x}", "sr16000", "wav16k") for i in range(n)]
+
+
+def _age(store, k, seconds):
+    t = time.time() - seconds
+    os.utime(store.path_for(k), (t, t))
+
+
+class _Vfs:
+    def __init__(self, free):
+        self.f_bavail, self.f_frsize = free // 4096, 4096
+
+
+def test_over_budget_evicts_least_recently_used_first(store):
+    ks = _keys_n(6)
+    for k in ks:
+        store.publish(k, _wave())                       # 400 kB each
+    for i, k in enumerate(ks):
+        _age(store, k, 600 - i * 60)                    # ks[0] oldest, all within TTL
+    assert store.attach(ks[0]) is not None              # a read refreshes it (LRU)
+    store.max_bytes = 3 * _wave().nbytes                # low water: 2 files (plus headers)
+    store.reap(budget_s=5)
+    present = [store.attach(k) is not None for k in ks]
+    assert present == [True, False, False, False, False, True]
+
+
+def test_expired_segments_are_reaped(store):
+    ks = _keys_n(3)
+    for k in ks:
+        store.publish(k, _wave())
+    _age(store, ks[1], 2 * store.ttl_s)
+    store.reap(budget_s=5)
+    assert [store.attach(k) is not None for k in ks] == [True, False, True]
+
+
+def test_a_declined_publish_still_reaps(store, monkeypatch):
+    """The reaper used to run only after a successful publish: a full store
+    declined forever and was never reaped again."""
+    ks = _keys_n(3)
+    for k in ks:
+        store.publish(k, _wave())
+        _age(store, k, 2 * store.ttl_s)
+    monkeypatch.setattr(os, "statvfs", lambda p: _Vfs(4096))
+    store.min_free_bytes = 2**30
+    store._statvfs_at = 0.0
+    store._last_reap = 0.0
+    assert store.publish(WAV.key("ef" * 16, "sr16000", "wav16k"), _wave()) is False
+    stats = store.drain_stats()
+    assert stats["shm_declined_space"] == 1 and stats["shm_reaped"] == 3
+
+
+def test_the_free_space_floor_evicts_least_recently_used(store, monkeypatch):
+    """A volume smaller than max_bytes + min_free_bytes fills before the budget does;
+    the floor used to decline publishes without evicting anything."""
+    ks = _keys_n(4)
+    for i, k in enumerate(ks):
+        store.publish(k, _wave())
+        _age(store, k, 600 - i * 60)                    # ks[0] oldest, all within TTL
+    seg = os.path.getsize(store.path_for(ks[0]))
+    store.max_bytes = 2**40                             # far under budget
+    store.min_free_bytes = seg                          # floor + 25%: 1.25 segments
+    monkeypatch.setattr(os, "statvfs", lambda p: _Vfs(0))
+    out = store.reap(budget_s=5)
+    assert out["reaped"] == 2                           # the two least recently used
+    assert [store.attach(k) is not None for k in ks] == [False, False, True, True]
+
+
+def test_eviction_reaches_its_target_whatever_the_time_budget(store, monkeypatch):
+    """The time budget bounds the walk, not the eviction: a budget that cut eviction
+    short once left a store 1.2 GB over its low water mark."""
+    ks = _keys_n(6)
+    for i, k in enumerate(ks):
+        store.publish(k, _wave())
+        _age(store, k, 600 - i * 60)
+    store.max_bytes = 3 * _wave().nbytes
+    import commonkit.store as cks
+    real_unlink = os.unlink
+    late = {"on": False}
+
+    def slow_unlink(path):            # the first unlink takes "longer than the budget"
+        late["on"] = True
+        real_unlink(path)
+    real_time = cks.time.time
+    monkeypatch.setattr(cks.time, "time", lambda: real_time() + (1000.0 if late["on"] else 0))
+    monkeypatch.setattr(os, "unlink", slow_unlink)
+    out = store.reap(budget_s=1)
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    monkeypatch.setattr(cks.time, "time", real_time)
+    assert out["complete"] is True and out["reaped"] >= 2
+    used = sum(os.path.getsize(store.path_for(k)) for k in ks
+               if os.path.exists(store.path_for(k)))
+    assert used <= int(0.8 * store.max_bytes)
+
+
+def test_a_partial_walk_neither_evicts_for_budget_nor_writes_usage(store, monkeypatch):
+    """A walk cut short under-counts the tree: it must not record that total, nor
+    evict for a budget it can't judge."""
+    for k in _keys_n(3):
+        store.publish(k, _wave())
+    marker = os.path.join(store.root, ".usage.json")
+    if os.path.exists(marker):
+        os.unlink(marker)
+    store.max_bytes = 1                                 # "over budget" if it were judged
+    import commonkit.store as cks
+    real = cks.time.time
+    calls = {"n": 0}
+
+    def clock():                       # past the deadline from the first directory on
+        calls["n"] += 1
+        return real() + (1000.0 if calls["n"] > 2 else 0.0)
+    monkeypatch.setattr(cks.time, "time", clock)
+    out = store.reap(budget_s=1)
+    monkeypatch.setattr(cks.time, "time", real)
+    assert out["complete"] is False
+    assert not os.path.exists(marker)
+    assert out["reaped"] == 0

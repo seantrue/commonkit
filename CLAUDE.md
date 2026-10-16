@@ -52,12 +52,15 @@ the call site; the store catches that and counts `shm_bad_key`.
   `mmap` (read-only enforced by numpy) or `read`. Publish writes a
   pid/thread-unique tmp file then `os.replace` (atomic). `_admit` gates
   cheapest-first: min size, max size, statvfs free-space watermark (cached 1s),
-  byte budget from `.usage.json`. The reaper runs opportunistically after
-  publish, holds `.reap.lock` (O_EXCL, broken after 300s), walks only the root,
-  `lstat`s and only unlinks regular `.npy` files, evicts TTL-expired then
-  oldest-mtime down to 80% of `max_bytes`, and writes `.usage.json` as the
-  cross-process usage figure. LRU uses explicit mtime touches (at most once
-  per 60s), not atime. Unlink-while-mapped is safe, so no refcounting exists.
+  byte budget from `.usage.json`.
+- **The reaper.** It runs, rate-limited by `reap_interval_s`, after every publish **and every space or budget decline**. Until 2026-10-16 it ran only after a successful publish, so a full store was never reaped again.
+  - It holds `.reap.lock` (O_EXCL, broken after 300 s).
+  - It walks only the root, and `lstat`s and unlinks only regular `.npy` files.
+  - It evicts TTL-expired segments, then least recently used first (oldest mtime) until **both** targets are met: 80% of `max_bytes`, and the free-space floor plus 25% headroom. Before 2026-10-16 the floor only gated publishes, so a volume smaller than `max_bytes + min_free_bytes` filled and stuck.
+  - `budget_s` bounds the **walk** only; eviction always reaches its target. The deadline is checked before each directory.
+  - A partial walk neither evicts for the budget nor writes `.usage.json`, the cross-process usage figure, because it would under-count.
+- LRU uses explicit mtime touches (at most once per 60 s), not atime.
+- Unlink-while-mapped is safe, so no refcounting exists.
 - `cache.py` — `TieredPixelCache`: L1 in-process memo (anything with
   `get`/`set_array`) in front of the L2 store. L1 memoises the *attached
   mapping*, not a copy. `get_with_source` returns `(arr, "l1"|"shm"|"decode")`

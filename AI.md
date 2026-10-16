@@ -43,6 +43,40 @@ inside a non-public application first.
 
 ## Contributions
 
+### 2026-10-16 — The reaper: run on declines, evict toward the free-space floor, finish eviction (Claude Opus 5.5, Claude Code)
+
+**What the maintainer asked for.** "Commonkit is supposed to LRU. Check the logic and tests." Then: "Yes to fix, 7GB, manual reap."
+
+**What was found.** On the maintainer's machine the shared store had sat full for 5.7 days:
+
+- the last reap was 137.8 hours earlier;
+- 1,104 segments were past their 7-day TTL;
+- every publish was declined (`shm_declined_space`).
+
+The eviction order itself was correct LRU. A probe (`claude-debug/lru_probe.py`, untracked) showed it evicting oldest-first and keeping a recently attached segment. The defects were in when the reaper ran and what it aimed for:
+
+1. **It ran only after a successful publish** (`_maybe_reap` at the end of `publish`). A store that filled declined every publish from then on, so nothing reaped it, not even TTL expiry. Reproduced: 4 expired segments survived 10 declined publishes.
+2. **The free-space floor was a publish gate, not an eviction target.** The maintainer's 9.3 GiB quota volume, with `MAX_GB=8` plus `MIN_FREE_GB=1`, filled before the byte budget did. Reproduced: `reap()` with free space below the floor and usage under budget evicted nothing.
+3. **The 50 ms time budget also cut eviction short.** The last reap left the store at 7.6 GB, above its 6.4 GB low water mark, and the next 361 publishes landed inside the 30-second reap interval.
+4. **Latent:** a walk cut short by the budget wrote its under-counted total to `.usage.json`.
+
+None of this was tested. The reaper tests covered only the root guard, files that aren't segments, and fresh segments left alone. These defects are in AI-written code from the 2026-09 extraction.
+
+**What the AI did:**
+
+- **The fixes** (`store.py`):
+  - space and budget declines call `_maybe_reap()`;
+  - eviction has a second LRU target, the free-space floor plus 25% headroom, measured fresh;
+  - `budget_s` bounds only the walk, and the deadline is checked before each directory;
+  - a partial walk records `complete: False`, skips budget eviction and doesn't write `.usage.json`.
+- **6 tests** in `tests/test_store.py`: LRU order with an attach refresh, TTL expiry, reaping on a declined publish, free-space-floor eviction, eviction past the time budget, and a partial walk. 72 tests pass.
+- **The maintainer's environment:** `COMMONKIT_STORE_MAX_GB` changed from 8 to 7 in `~/.bashrc`.
+
+**Defects in this change's own work, caught by its tests:**
+
+- **The first version checked the walk deadline after each directory,** so a walk that finished its last directory late was marked partial with nothing skipped. Caught by the eviction-past-the-budget test; the check now comes before each directory.
+- **Three new tests had wrong expectations as first written:** a miscount of segments under the low water mark (`.npy` headers), ages past the TTL, and fake clocks that didn't move the deadline.
+
 ### 2026-10-02 — `shared_store(attach=...)`: how a caller reads is its own choice (Claude Opus 5.5, Claude Code)
 
 **What the maintainer asked for.** "Do the follow ups". One follow-up was moving alexandria onto the shared store, and alexandria picks `mmap` or `read` attach per process (`PIXEL_SHM_ATTACH`).

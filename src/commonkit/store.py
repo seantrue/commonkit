@@ -245,6 +245,11 @@ class SharedArrayStore:
     def _admit(self, nbytes: int) -> bool:
         """Four gates, cheapest first. A decline is normal operation, not a fault.
 
+        A space or budget decline also gives the reaper its rate-limited turn. It used to
+        run only after a SUCCESSFUL publish, so a store that filled up declined every
+        publish from then on and nothing ever reaped it again -- not even TTL expiry
+        (found 2026-10-16: a store left full for 5.7 days with 1,104 expired segments).
+
         This is the answer to "reading a whole stream into shared memory because
         something downstream jammed". Over any gate we decline and the caller
         keeps the private array it already holds -- we never block and never nack,
@@ -260,16 +265,18 @@ class SharedArrayStore:
             return False
         if self._free_bytes() < self.min_free_bytes:
             self.stats["shm_declined_space"] += 1
+            self._maybe_reap()
             return False
         used, _ = self.usage()
         if used >= 0 and used + nbytes > self.max_bytes:
             self.stats["shm_declined_budget"] += 1
+            self._maybe_reap()
             return False
         return True
 
-    def _free_bytes(self) -> int:
+    def _free_bytes(self, fresh: bool = False) -> int:
         now = time.time()
-        if now - self._statvfs_at > _STATVFS_TTL_S:
+        if fresh or now - self._statvfs_at > _STATVFS_TTL_S:
             try:
                 st = os.statvfs(self.root)
                 self._statvfs_free = st.f_bavail * st.f_frsize
@@ -339,7 +346,9 @@ class SharedArrayStore:
             self.stats["shm_reap_failed"] += 1
 
     def reap(self, *, budget_s=0.25) -> dict:
-        """Unlink expired and over-budget segments. Bounded, lock-guarded.
+        """Unlink expired segments, then the least recently used (oldest mtime; attach
+        refreshes it) until the store is under its low water mark and the volume above
+        its free-space floor. Lock-guarded; ``budget_s`` bounds the walk.
 
         Safe because unlink-while-mapped is safe: a consumer mid-read keeps its
         mapping, and a consumer that arrives later simply misses and re-decodes.
@@ -375,7 +384,12 @@ class SharedArrayStore:
             deadline = time.time() + float(budget_s)
             now = time.time()
             entries = []
+            complete = True
             for dirpath, dirnames, filenames in os.walk(self.root):
+                # checked BEFORE each directory: "partial" means one went unscanned
+                if time.time() > deadline:
+                    complete = False
+                    break
                 for name in filenames:
                     if not name.endswith(".npy"):
                         continue
@@ -388,38 +402,51 @@ class SharedArrayStore:
                         continue
                     out["scanned"] += 1
                     entries.append((st.st_mtime, st.st_size, p))
-                if time.time() > deadline:
-                    break
 
             total = sum(e[1] for e in entries)
-            entries.sort()                          # oldest mtime first
+            entries.sort()                          # oldest mtime first: LRU
 
+            # Two targets, least recently used first. The byte budget's low water mark
+            # (judged only on a complete walk: a partial one under-counts), and the
+            # free-space floor with 25% headroom. The floor used to be a publish gate
+            # only, so a volume that filled before the budget did -- a quota smaller than
+            # max_bytes + min_free_bytes -- declined everything and evicted nothing.
             low_water = int(0.8 * self.max_bytes)
+            need_free = max(0, int(1.25 * self.min_free_bytes) - self._free_bytes(fresh=True))
+            freed = 0
             for mtime, size, p in entries:
                 expired = (now - mtime) > self.ttl_s
-                over = total > low_water
-                if not (expired or over):
+                over = complete and total > low_water
+                short = freed < need_free
+                if not (expired or over or short):
                     break
+                # Unlinking is cheap and bounded by the walk, so eviction always reaches
+                # its target: the time budget limits the walk, not the eviction. A budget
+                # that cut eviction short left a store 1.2 GB over its low water mark.
                 try:
                     os.unlink(p)
                 except OSError:
                     continue
                 total -= size
+                freed += size
                 out["reaped"] += 1
                 out["bytes"] += size
-                if time.time() > deadline:
-                    break
+            out["complete"] = complete
 
-            try:
-                import json
-                tmp = os.path.join(self.root, ".usage.json.tmp")
-                with open(tmp, "w") as fh:
-                    json.dump({"bytes": total,
-                               "files": out["scanned"] - out["reaped"],
-                               "ts": now}, fh)
-                os.replace(tmp, os.path.join(self.root, ".usage.json"))
-            except OSError:
-                pass
+            if complete:                            # a partial walk would under-count
+                try:
+                    import json
+                    tmp = os.path.join(self.root, ".usage.json.tmp")
+                    with open(tmp, "w") as fh:
+                        json.dump({"bytes": total,
+                                   "files": out["scanned"] - out["reaped"],
+                                   "ts": now}, fh)
+                    os.replace(tmp, os.path.join(self.root, ".usage.json"))
+                except OSError:
+                    pass
+            else:
+                self.stats["shm_reap_partial"] += 1
+            self._statvfs_at = 0.0                  # free space changed: re-measure
 
             self.stats["shm_reaped"] += out["reaped"]
             self.stats["shm_reaped_bytes"] += out["bytes"]

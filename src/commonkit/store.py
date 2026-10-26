@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
+import stat
 import threading
 import time
 from collections import Counter
@@ -278,8 +280,8 @@ class SharedArrayStore:
         now = time.time()
         if fresh or now - self._statvfs_at > _STATVFS_TTL_S:
             try:
-                st = os.statvfs(self.root)
-                self._statvfs_free = st.f_bavail * st.f_frsize
+                # f_bavail * f_frsize on POSIX (statvfs); GetDiskFreeSpaceExW on Windows
+                self._statvfs_free = shutil.disk_usage(self.root).free
             except OSError:
                 self._statvfs_free = 0
             self._statvfs_at = now
@@ -352,6 +354,8 @@ class SharedArrayStore:
 
         Safe because unlink-while-mapped is safe: a consumer mid-read keeps its
         mapping, and a consumer that arrives later simply misses and re-decodes.
+        Windows refuses to unlink a mapped file (sharing violation); the reaper
+        skips it and a later pass reaps it once nothing holds it.
 
         BLAST RADIUS. This is the only thing in the store that deletes anything,
         so it is deliberately narrow: it walks only ``self.root``, unlinks only
@@ -398,7 +402,7 @@ class SharedArrayStore:
                         st = os.lstat(p)            # lstat: never follow a symlink
                     except OSError:
                         continue
-                    if not os.path.stat.S_ISREG(st.st_mode):
+                    if not stat.S_ISREG(st.st_mode):
                         continue
                     out["scanned"] += 1
                     entries.append((st.st_mtime, st.st_size, p))

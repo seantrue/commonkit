@@ -5,6 +5,8 @@ is never an error, only a slower path**. Absent root, full filesystem, reaped
 segment, torn file, malformed key -- all return None or False.
 """
 import os
+import shutil
+import sys
 import time
 
 import numpy as np
@@ -127,9 +129,7 @@ def test_declines_above_the_per_item_ceiling(store):
 
 def test_declines_when_the_filesystem_is_near_full_and_never_blocks(
         store, monkeypatch):
-    class _FakeVfs:
-        f_bavail, f_frsize = 1, 4096
-    monkeypatch.setattr(os, "statvfs", lambda p: _FakeVfs())
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(4096))
     store._statvfs_at = 0.0
     store.min_free_bytes = 8 * 2**30
     assert store.publish(key(), _wave()) is False
@@ -152,14 +152,17 @@ def test_mode_off_is_entirely_inert(tmp_path):
     assert s.attach(key()) is None and s.publish(key(), _wave()) is False
 
 
-def test_an_unusable_root_degrades_instead_of_raising():
-    s = SharedArrayStore("/proc/nonexistent/segments", mode="readwrite")
+def test_an_unusable_root_degrades_instead_of_raising(tmp_path):
+    # under a regular file: no directory can be made there on any platform
+    (tmp_path / "a-file").write_bytes(b"")
+    s = SharedArrayStore(str(tmp_path / "a-file" / "segments"), mode="readwrite")
     assert s.disabled is True
     assert s.attach(key()) is None and s.publish(key(), _wave()) is False
 
 
 # ------------------------------------------------------------------ integrity
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cannot unlink a mapped file")
 def test_unlink_while_mapped_keeps_a_live_reader_working(store):
     """The reaper's whole licence: it unlinks on policy without knowing who is
     attached, because a live mapping survives the name going away."""
@@ -169,6 +172,19 @@ def test_unlink_while_mapped_keeps_a_live_reader_working(store):
     os.unlink(store.path_for(key()))
     assert np.array_equal(np.asarray(b), a)
     assert store.attach(key()) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="POSIX unlinks a mapped file")
+def test_the_reaper_skips_a_mapped_segment_on_windows(store):
+    """Windows' sharing violation: the reaper leaves the segment and its reader alone."""
+    a = _wave()
+    store.publish(key(), a)
+    b = store.attach(key())
+    store.ttl_s = -1
+    assert store.reap(budget_s=5)["reaped"] == 0
+    assert np.array_equal(np.asarray(b), a)
+    del b
+    assert store.reap(budget_s=5)["reaped"] == 1
 
 
 def test_a_truncated_segment_is_a_miss_not_a_crash(store):
@@ -242,9 +258,10 @@ def _age(store, k, seconds):
     os.utime(store.path_for(k), (t, t))
 
 
-class _Vfs:
+class _Usage:
+    """What shutil.disk_usage returns, as far as the store reads it."""
     def __init__(self, free):
-        self.f_bavail, self.f_frsize = free // 4096, 4096
+        self.free = free
 
 
 def test_over_budget_evicts_least_recently_used_first(store):
@@ -276,7 +293,7 @@ def test_a_declined_publish_still_reaps(store, monkeypatch):
     for k in ks:
         store.publish(k, _wave())
         _age(store, k, 2 * store.ttl_s)
-    monkeypatch.setattr(os, "statvfs", lambda p: _Vfs(4096))
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(4096))
     store.min_free_bytes = 2**30
     store._statvfs_at = 0.0
     store._last_reap = 0.0
@@ -295,7 +312,7 @@ def test_the_free_space_floor_evicts_least_recently_used(store, monkeypatch):
     seg = os.path.getsize(store.path_for(ks[0]))
     store.max_bytes = 2**40                             # far under budget
     store.min_free_bytes = seg                          # floor + 25%: 1.25 segments
-    monkeypatch.setattr(os, "statvfs", lambda p: _Vfs(0))
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: _Usage(0))
     out = store.reap(budget_s=5)
     assert out["reaped"] == 2                           # the two least recently used
     assert [store.attach(k) is not None for k in ks] == [False, False, True, True]

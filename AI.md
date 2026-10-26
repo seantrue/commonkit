@@ -43,6 +43,18 @@ inside a non-public application first.
 
 ## Contributions
 
+### 2026-10-26 — The store on Windows: free space, the reaper, a default root (Claude Opus 5.5, Claude Code)
+
+**What the maintainer asked for.** A one-worker vimp engine fleet on the Windows 11 VM; its tests failed in commonkit first ("module 'os' has no attribute 'statvfs'"), which it imports for the shared store.
+
+**What the AI did.**
+
+- `store.py` (~10 LOC): free space from `shutil.disk_usage(root).free`, which is `f_bavail * f_frsize` on POSIX (the same number) and `GetDiskFreeSpaceExW` on Windows. The reaper's `os.path.stat.S_ISREG` becomes `stat.S_ISREG`: it worked only because `posixpath` imports `stat`, and on Windows every reap died with an `AttributeError` (swallowed by `_maybe_reap`), so nothing was ever reaped. The reaper's docstring notes Windows' sharing violation: a mapped segment can't be unlinked, so the reaper skips it until nothing holds it.
+- `shared.py` (~8 LOC): the Windows default root is `%LOCALAPPDATA%\commonkit\store` (else `~/AppData/Local/...`), with macOS's 2 GB budget since it is on disk. It was `/dev/shm/commonkit`, which Windows reads as `\dev\shm` on the current drive. impressionist-rs's `vimp` store and ImpCraft's `shm` reader were given the same default (impressionist-rs #19).
+- Tests (~30 LOC): the free-space tests fake `shutil.disk_usage` (they faked `os.statvfs`, absent on Windows); the unusable-root test uses a path under a regular file instead of `/proc/...` (which Windows happily created as `C:\proc\...`, removed afterwards); `test_unlink_while_mapped_keeps_a_live_reader_working` is POSIX-only, and a Windows-only test checks that the reaper skips a mapped segment, leaves its reader working, and reaps it once released; the defaults test covers Windows.
+
+**Testing.** Linux: 72 passed, 1 skipped (the Windows-only test); ruff shows only the 6 errors already on `main`. Windows VM: 63 passed, 10 skipped (ffmpeg and sox absent, and the POSIX unlink test). ImpCraft's engine tests on the VM went from 40 failures to the 7 that also fail on Linux once this and the engine's own fixes were in.
+
 ### 2026-10-16 — The reaper: run on declines, evict toward the free-space floor, finish eviction (Claude Opus 5.5, Claude Code)
 
 **What the maintainer asked for.** "Commonkit is supposed to LRU. Check the logic and tests." Then: "Yes to fix, 7GB, manual reap."

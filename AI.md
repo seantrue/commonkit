@@ -43,6 +43,24 @@ inside a non-public application first.
 
 ## Contributions
 
+### 2026-10-27 — A plan for a Rust crate beside the Python package (Claude Opus 5.5, Claude Code, with one delegated agent)
+
+**What the maintainer asked for.** "Make a plan to integrate a crate into the commonkit package." Then the names, "Let's go for a pypi name of pycommonkit and the crate of commonkit", MIT and Python 3.11+, and a decision on every recommendation, several of which overturned the AI's.
+
+**What the AI did.** `docs/rust-crate-plan.md` (553 lines; a PDF beside it, untracked): a pure Rust crate `commonkit` in a `rust/` workspace implementing the same on-disk contract as Python, a written `docs/contract.md` as the authority, shared conformance vectors across both languages, mmap behind one audited module, migration of ImpCraft's `impcraft-shm` and PlumCraft's `plumcraft-store`, the rename to `pycommonkit` (checked on a scratch copy with uv 0.12.5: `module-name = "commonkit"` is required; PEP 639 licence metadata works), 16 inconsistencies found between the three implementations, and a ten-step plan of 17–21 days. A delegated agent wrote the first draft; the AI reviewed and edited it.
+
+**The maintainer's decisions and corrections (C1–C17).**
+
+- **Write-once rules** ("Add the contract rules"), after asking "How does an array get torn if it can only be written to once?": the plan had called a torn file a risk without saying it can only come from outside the contract. **fsync** became a policy option, "default to no".
+- **Windows (C10).** The AI's plan recommended dropping `impcraft-shm`'s Windows branch, on its own assumption that only macOS and Linux mattered. The maintainer: "Just don't delete support from shared infrastructure like commonkit. There is commonkit work already complete on windows, and we will merge it in later." A defect in the plan, caught by the maintainer.
+- **`.policy.json` (C7):** obeyed if present, and the file wins over the environment.
+- **mmap (C5):** default-on, and PlumCraft does not turn it off (the plan had it reading by copy).
+- **Republishing (C15).** The AI recommended rewriting an existing key, for parity with Python. The maintainer: "Why would I rewrite an existing file?", then: a different array under a whole file's key "is not torn, that's a major system error". Now a torn file is replaced, a matching one touched, and a collision raises `KeyCollision` (Rust `Err`), with `verify_republish` comparing bytes in CI. A wrong recommendation, caught by the maintainer.
+- **`cache.py` (C14):** left out of Rust, after the maintainer asked what it does.
+- C1–C4, C6, C8, C9, C11–C13 as recommended.
+
+**Not done.** No code, no rename, nothing published. The names were free on PyPI and crates.io on 2026-10-27.
+
 ### 2026-10-16 — The reaper: run on declines, evict toward the free-space floor, finish eviction (Claude Opus 5.5, Claude Code)
 
 **What the maintainer asked for.** "Commonkit is supposed to LRU. Check the logic and tests." Then: "Yes to fix, 7GB, manual reap."
